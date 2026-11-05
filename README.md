@@ -1,15 +1,61 @@
-# Helius Node.js SDK
+# Helius TypeScript SDK
 
 [![Version](https://img.shields.io/npm/v/helius-sdk)](https://www.npmjs.org/package/helius-sdk)
 ![Downloads](https://img.shields.io/npm/dm/helius-sdk)
 
-The Helius Node.js library provides access to the Helius API from JavaScript/TypeScript.
+The Helius TypeScript SDK provides access to Helius APIs and enhanced Solana RPC functionality, making building on Solana as easy as possible.
+
+### Agent Account Sign Up
+
+The SDK ships two signup helpers on `helius.auth`:
+
+- `signup(opts)` — authenticates the wallet, detects existing projects, and returns either `kind: "already_subscribed"`, `kind: "upgrade_required"`, or `kind: "payment_required"` with a hosted-checkout link the user opens in a browser.
+- `signupAndPay(opts)` — same as `signup`, plus auto-pays USDC + memo from the local keypair and polls activation. On poll timeout returns `kind: "pending"` with the `txSignature` so callers can resume later.
+
+```ts
+import { makeAuthClient } from "helius-sdk/auth/client";
+
+const auth = makeAuthClient();
+const { secretKey } = await auth.generateKeypair();
+
+const result = await auth.signup({
+  secretKey,
+  plan: "agent",
+  email: "you@example.com",
+  firstName: "Jane",
+  lastName: "Doe",
+});
+
+if (result.kind === "payment_required") {
+  console.log("Pay here:", result.paymentLink.paymentUrl);
+}
+```
+
+See [`examples/auth/signup.ts`](./examples/auth/signup.ts) and [`examples/auth/signupAndPay.ts`](./examples/auth/signupAndPay.ts) for full flows.
+
+> **For AI Agents:** You can create a Helius account and generate an API key programmatically using the helius-cli. See the [agent signup guide](https://www.helius.dev/docs/api-reference/helius-cli.md) or [helius-cli agent file](https://dashboard.helius.dev/agents.md) for complete details.
 
 ## Documentation
 
-API reference documentation is available at [docs.helius.dev](https://docs.helius.dev).
+API reference documentation is available at [helius.dev/docs](https://www.helius.dev/docs).
+
+For detailed SDK API docs (auto-generated from source), see the [TypeDoc Reference](https://helius-labs.github.io/helius-sdk/).
+
+See the [CHANGELOG](https://github.com/helius-labs/helius-sdk/blob/main/CHANGELOG.md) for version history and release notes.
+
+LaserStream gRPC streaming is not part of this SDK. Use the standalone [`helius-laserstream`](https://www.npmjs.com/package/helius-laserstream) package instead.
+
+## Contributions
+
+Interested in contributing? Read the following [contributions guide](https://github.com/helius-labs/helius-sdk/blob/main/CONTRIBUTING.md) before opening a PR.
 
 ## Installation
+
+Using pnpm (recommended):
+
+```shell
+pnpm add helius-sdk
+```
 
 Using npm:
 
@@ -25,25 +71,129 @@ yarn add helius-sdk
 
 ## Usage
 
-The package needs to be configured with your account's API key, which is available in the [Helius Dashboard](https://dev.helius.xyz/dashboard/app). 
-```js 
-import { Helius } from "helius-sdk";
+The package needs to be configured with your account's API key, which is available in the [Helius Dashboard](https://dashboard.helius.dev/).
 
-// Replace YOUR_API_KEY with the API key from your Helius dashboard
-const helius = new Helius("YOUR_API_KEY"); 
+```ts
+import { createHelius } from "helius-sdk";
 
-const getAssetsByOwner = async () => {
-  const response = await helius.rpc.getAssetsByOwner({
-    ownerAddress: "86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY",
-    page: 1,
-  });
-  console.log(response.items);
-}
+(async () => {
+  const apiKey = ""; // From Helius dashboard
+  const helius = createHelius({ apiKey });
 
-getAssetsByOwner();
+  try {
+    const assets = await helius.getAssetsByOwner({
+      ownerAddress: "owner_address_goes_here",
+      page: 1,
+      limit: 50,
+      sortBy: { sortBy: "created", sortDirection: "asc" },
+    });
+
+    console.log("Fetched assets:", assets);
+  } catch (error) {
+    console.error("Error:", error);
+  }
+})();
 ```
 
-[![Try it out](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/edit/helius-node-js-sdk-xbw7t6?file=index.js)
+### Custom RPC transport (retries, failover)
+
+`createHelius` accepts a `transport` hook that lets you augment or replace the default RPC transport, following [`@solana/kit`'s custom-transport pattern](https://github.com/anza-xyz/kit#custom-rpc-transports). The hook receives the SDK's fully configured transport (Helius URL with your API key, SDK headers, and request-id stamping) and returns the transport the client will use for **all** JSON-RPC calls — standard Solana RPC and DAS/Helius methods alike.
+
+```ts
+import { createHelius, type RpcTransport } from "helius-sdk";
+
+const helius = createHelius({
+  apiKey,
+  transport: (defaultTransport: RpcTransport): RpcTransport => async (request) => {
+    // Retry up to 3 times with exponential backoff
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await defaultTransport(request);
+      } catch (error) {
+        lastError = error;
+        await new Promise((r) => setTimeout(r, 2 ** attempt * 100));
+      }
+    }
+    throw lastError;
+  },
+});
+```
+
+For per-method policies, read the method name off the request: `(request.payload as { method: string }).method`.
+
+To replace the transport entirely (e.g., failover to a non-Helius endpoint), ignore the provided default: `transport: () => myCustomTransport`. See [`examples/helius/customTransport.ts`](examples/helius/customTransport.ts) for a full example.
+
+> **Note:** The hook covers JSON-RPC traffic only. WebSocket subscriptions (`helius.ws`) and the REST sub-clients (`webhooks`, `parsedEvents`, `enhanced`, `wallet`, `admin`, `auth`) do not go through this transport.
+
+### Using `@solana/kit` helpers
+
+Standard Solana RPC methods on `helius` (and `helius.raw`) send automatically, so they are not a `@solana/kit` `Rpc`. To pass the client to kit helpers or other libraries that expect one, use `helius.kitRpc`, the standard kit `Rpc` on the same JSON-RPC transport:
+
+```ts
+import { fetchEncodedAccount } from "@solana/kit";
+
+const account = await fetchEncodedAccount(helius.kitRpc, address);
+const slot = await helius.kitRpc.getSlot().send();
+```
+
+Don't pass `helius` or `helius.raw` to kit helpers: the request is sent immediately, and the helper then fails when it calls `.send()`.
+
+See [`examples/helius/kitRpc.ts`](examples/helius/kitRpc.ts) for a full example.
+
+### Larger transactions with version 1
+
+Agave 4.2 raises the maximum transaction size from 1,232 to 4,096 bytes ([SIMD-0296](https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0296-larger-transactions.md)). That size is only available in the version 1 transaction format ([SIMD-0385](https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0385-transaction-v1.md)). Legacy and v0 transactions are unaffected and remain the default.
+
+Opt in by passing `version: 1`:
+
+```typescript
+const smart = await helius.tx.createSmartTransaction({
+  signers: [feePayerSigner],
+  instructions: [transferIx],
+  version: 1,
+});
+```
+
+Version 1 moves the compute-unit limit and priority fee out of `ComputeBudgetProgram` instructions and into the transaction header, so a v1 transaction is *smaller* on the wire than the v0 equivalent even before you use the extra room. The SDK handles this for you — do not pass compute-budget instructions yourself, as they are no-ops on v1 that still consume bytes and compute units.
+
+The header also carries the loaded-accounts-data-size limit, and SIMD-0385 treats an absent field as a request for **0 bytes** — a transaction that fails account loading outright — rather than the 64 MiB default legacy and v0 enjoy. The SDK always sets it on v1 (64 MiB unless you pass `loadedAccountsDataSizeLimit` to request less, which reserves less under the v1 cost model). If you assemble v1 messages by hand, `createTxMessage` pre-sets the data-size limit to the 64 MiB maximum (override it with kit's `setTransactionMessageLoadedAccountsDataSizeLimit`); you must still set the compute-unit limit and priority fee yourself with `setTransactionMessageComputeUnitLimit` and `setTransactionMessagePriorityFeeLamports`.
+
+Because v1 pays a **total** priority fee in lamports rather than a per-compute-unit rate, the result reports both:
+
+```typescript
+smart.priorityFee;         // microLamports per CU, the rate the SDK settled on
+smart.priorityFeeLamports; // total lamports the transaction pays
+```
+
+You can budget against either. `priorityFeeCap` caps the per-CU rate; `priorityFeeLamportsCap` caps the absolute spend:
+
+```typescript
+const smart = await helius.tx.createSmartTransaction({
+  signers: [feePayerSigner],
+  instructions: [transferIx],
+  version: 1,
+  priorityFeeLamportsCap: 50_000, // Never spend more than 50k lamports on priority
+});
+```
+
+#### Version 1 constraints
+
+Version 1 **does not support address lookup tables**. Every account must be listed inline, and the SDK throws if an instruction sources an account from a lookup table. Use version 0 if you depend on them.
+
+The format also caps a transaction at 64 instructions, 64 unique addresses, 12 signatures, and 255 accounts per instruction. At 4,096 bytes the full address list usually fits inline anyway.
+
+The SDK checks the size limit before requesting any signature, so an oversized transaction fails locally rather than on submission.
+
+### Migrating to `helius-sdk` 2.0.0
+
+The Helius Node.js SDK has been rewritten from the ground up in version 2.0.0 to use [`@solana/kit` (i.e., Kit)](https://www.npmjs.com/package/@solana/kit) under the hood, replacing the dependency on `@solana/web3.js` versions higher than 1.73.2.
+
+We've gone to great lengths to ensure that the developer experience remains largely the same, with minimal impact on existing code. The API methods and namespaces are designed to be intuitive and an improvement on previous versions, so migrating to the latest version is relatively straightforward. There are a plethora of examples found in the `examples` directory, organized by namespace, to aid in this migration.
+
+For more detailed migration help, refer to the following [migration guide](https://github.com/helius-labs/helius-sdk/blob/main/MIGRATION.md)
+
+For general help with Kit, please refer to [Kit's new documentation site](https://www.solanakit.com/)
 
 ## Handling errors
 
@@ -51,13 +201,16 @@ When the API returns a non-success status code (4xx or 5xx response), an error m
 
 ```ts
 try {
-  const response = await helius.rpc.getAssetsByOwner({
-    ownerAddress: "86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY",
+  const assets = await helius.getAssetsByOwner({
+    ownerAddress: "owner_address_goes_here",
     page: 1,
+    limit: 50,
+    sortBy: { sortBy: "created", sortDirection: "asc" },
   });
-  console.log(response.items);
+
+  console.log("Fetched assets:", assets);
 } catch (error) {
-  console.log(error);
+  console.error("Error:", error);
 }
 ```
 
@@ -65,781 +218,292 @@ try {
 
 When working with the Helius SDK, you may encounter several error codes. Below is a table detailing some of the common error codes along with additional information to help you troubleshoot:
 
-| Error Code | Error Message             | More Information                                                                           |
-|------------|---------------------------|---------------------------------------------------------------------------------------------|
-| 401        | Unauthorized              | This occurs when an invalid API key is provided or access is restricted due to RPC rules.   |
-| 429        | Too Many Requests         | This indicates that the user has exceeded the request limit in a given timeframe or is out of credits. |
-| 5XX        | Internal Server Error     | This is a generic error message for server-side issues. Please contact Helius support for assistance. |
+| Error Code | Error Message         | More Information                                                                                       |
+| ---------- | --------------------- | ------------------------------------------------------------------------------------------------------ |
+| 401        | Unauthorized          | This occurs when an invalid API key is provided or access is restricted due to RPC rules.              |
+| 429        | Too Many Requests     | This indicates that the user has exceeded the request limit in a given timeframe or is out of credits. |
+| 5XX        | Internal Server Error | This is a generic error message for server-side issues. Please contact Helius support for assistance.  |
 
 If you encounter any of these errors, refer to the Helius documentation for further guidance, or reach out to the Helius support team for more detailed assistance.
 
 ## Using the Helius SDK
 
-Our SDK is designed to give you a seamless experience when building on Solana. We've separated the core functionality into various segments.
+Our SDK is designed to give you a seamless experience when building on Solana. We've separated the core functionality into various segments. Examples for individual methods can be found in the `examples` directory, with examples organized by namespace.
 
-[**DAS API**](#das-api-digital-asset-standard)
+[**DAS API**](https://www.helius.dev/docs/das-api)
 
-Comprehensive and performant API for tokens, NFTs, and compressed NFTs on Solana.
+Comprehensive and performant API for tokens, NFTs, and compressed NFTs on Solana. Available on the `helius` namespace.
 
-  - [`getAsset()`](#getAsset): Get an asset by its ID.
-  - [`getAssetBatch()`](#getAssetBatch): Get multiple assets by ID (up to 1k).
-  - [`getSignaturesForAsset()`](#getSignaturesForAsset): Get a list of transaction signatures related to a compressed asset.
-  - [`searchAssets()`](#searchAssets): Search for assets by a variety of parameters. Very useful for token-gating!
-  - [`getAssetProof()`](#getAssetProof): Get a Merkle proof for a compressed asset by its ID.
-  - [`getAssetsByOwner()`](#getAssetsByOwner): Get a list of assets owned by an address. This is the fastest way to get all the NFTs and fungible tokens that are owned by a wallet on Solana.
-  - [`getAssetsByGroup()`](#getAssetsByGroup): Get a list of assets by a group key and value. This endpoint is very useful for getting the mint list for NFT Collections.
-  - [`getAssetsByCreator()`](#getAssetsByCreator): Get a list of assets created by an address.
-  - [`getAssetsByAuthority()`](#getAssetsByAuthority): Get a list of assets with a specific authority.
-  - [`getTokenAccounts()`](#getTokenAccounts): Get information about all token accounts for a specific mint or a specific owner.
-  - [`getNftEditions()`](#getNftEditions): Get information about all the edition NFTs for a specific master NFT
+- [`getAsset()`](https://www.helius.dev/docs/api-reference/das/getasset): Get an asset by its ID.
+- [`getAssetBatch()`](https://www.helius.dev/docs/api-reference/das/getassetbatch): Get multiple assets by their IDs (up to 1k).
+- [`getAssetProof()`](https://www.helius.dev/docs/api-reference/das/getassetproof): Get a Merkle proof for a compressed asset by its ID.
+- [`getAssetProofBatch()`](https://www.helius.dev/docs/api-reference/das/getassetproofbatch): Get Merkle proofs for a set of compressed assets by their IDs.
+- [`getAssetsByAuthority()`](https://www.helius.dev/docs/api-reference/das/getassetsbyauthority): Get a list of assets with a specific authority.
+- [`getAssetsByCreator()`](https://www.helius.dev/docs/api-reference/das/getassetsbycreator): Get a list of assets created by an address.
+- [`getAssetsByGroup()`](https://www.helius.dev/docs/api-reference/das/getassetsbygroup): Get a list of assets by a group key and value. This endpoint is very useful for getting the mint list for NFT Collections.
+- [`getAssetsByOwner()`](https://www.helius.dev/docs/api-reference/das/getassetsbyowner): Get a list of assets owned by an address. This is the fastest way to get all the NFTs and fungible tokens that are owned by a wallet on Solana.
+- [`getNftEditions()`](https://www.helius.dev/docs/api-reference/das/getnfteditions): Get information about all the edition NFTs for a specific master NFT.
+- [`getTokenAccounts()`](https://www.helius.dev/docs/api-reference/das/gettokenaccounts): Get information about all token accounts for a specific mint or a specific owner.
+- [`searchAssets()`](https://www.helius.dev/docs/api-reference/das/searchassets): Search for assets by a variety of parameters. This is very useful for token-gating.
 
-[**Mint API**](#mint-api)
+**RPC V2 Methods**
 
-The easiest way to mint compressed NFTs at scale.
+Enhanced RPC methods, available only with Helius.
 
-- [`mintCompressedNft()`](#mintCompressedNft): Mint a new compressed NFT. 
-- [`delegateCollectionAuthority()`](#delegatecollectionauthority-and-revokecollectionauthority): Delegates collection authority to a new address.
-- [`revokeCollectionAuthority()`](#delegatecollectionauthority-and-revokecollectionauthority): Revokes collection authority from an address.
-- [`getMintlist()`](#getMintlist) Get all the tokens for an NFT collection.
+- [`getProgramAccountsV2()`](https://www.helius.dev/docs/api-reference/rpc/http/getprogramaccountsv2): Enhanced version of `getProgramAccounts` with cursor-based pagination and `changedSinceSlot` support for efficiently querying large sets of accounts owned by specific Solana programs with incremental updates.
+- `getAllProgramAccounts()`: Auto-paginates through all program accounts. Use with caution on larger programs.
+- [`getTokenAccountsByOwnerV2()`](https://www.helius.dev/docs/api-reference/rpc/http/gettokenaccountsbyownerv2): An enhanced version of `getTokenAccountsByOwner` with cursor-based pagination and `changedSinceSlot` support to incrementally retrieve SPL token accounts owned by a given mint.
+- `getAllTokenAccountsByOwner()`: Auto-paginates all token accounts for a given owner.
+- [`getTransactionsForAddress()`](https://www.helius.dev/docs/rpc/gettransactionsforaddress): Get transaction history for an address with advanced filtering by slot, time, and bidirectional sorting options. Supports both signature-only and full transaction details. Optionally include transactions from associated token accounts.
+- [`getTransfersByAddress()`](https://www.helius.dev/docs/rpc/gettransfersbyaddress): Get parsed token and native SOL transfer history for an address with filters by mint, time, amount, counterparty, direction, and cursor pagination.
 
-[**Webhooks**](#webhooks)
+[**Staking**](https://www.helius.dev/docs/staking/how-to-stake-with-helius-programmatically)
 
-Provides methods for setting up, editing, and managing webhooks, crucial for listening to on-chain Solana events (e.g., sales, listings, swaps) and triggering actions when these events happen.
+The easiest way to stake with Helius programmatically. Available on the `helius.staking` namespace.
 
-- [`createWebhook()`](#createWebhook): Creates a new webhook with the provided request.
-- [`editWebhook()`](#editWebhook): Edits an existing webhook by its ID with the provided request.
-- [`appendAddressesToWebhook()`](#appendAddressesToWebhook): Append new addresses to an existing webhook.
-- [`removeAddressesFromWebhook()`](#removeAddressesFromWebhook): Remove addresses from an existing webhook.
-- [`deleteWebhook()`](#deleteWebhook): Deletes a webhook by its ID.
-- [`getWebhookByID()`](#getWebhookByID): Retrieves a single webhook by its ID.
-- [`getAllWebhooks()`](#getAllWebhooks): Retrieves a list of all webhooks.
-- [`createCollectionWebhook()`](#createCollectionWebhook) Create a new collection webhook with the provided request.
+- `createStakeTransaction()`: Generate a transaction to create + delegate a new stake account to the Helius validator.
+- `createUnstakeTransaction()`: Generate a transaction to deactivate a stake account.
+- `createWithdrawTransaction()`: Generate a transaction to withdraw lamports from a stake account (after cooldown).
+- `getStakeInstructions()`: Return only the instructions for creating and delegating a stake account.
+- `getUnstakeInstruction()`: Return the instruction to deactivate a stake account.
+- `getWithdrawInstruction()`: Return the instruction to withdraw lamports from a stake account.
+- `getWithdrawableAmount()`: Determine how many lamports are withdrawable (with optional rent-exempt inclusion).
+- `getHeliusStakeAccounts()`: Return all stake accounts delegated to the Helius validator for a given wallet.
 
-[**Smart Transactions**](https://docs.helius.dev/solana-rpc-nodes/sending-transactions-on-solana#sending-smart-transactions)
-- [`createSmartTransaction()`](#createSmartTransaction): Creates a smart transaction with the provided configuration
-- [`getComputeUnits()`](#getComputeUnits): Simulates a transaction to get the total compute units consumed
-- [`pollTransactionConfirmation()`](#pollTransactionConfirmation): Polls a transaction to check whether it has been confirmed
-- [`sendSmartTransaction()`](#sendSmartTransaction): Builds and sends an optimized transaction
+[**Transactions**](https://docs.helius.dev/solana-rpc-nodes/sending-transactions-on-solana#sending-smart-transactions)
 
-[**Jito Smart Transactions and Helper Methods**]()
-- [`addTipInstruction()`](#addTipInstruction): Adds a tip instruction as the last instruction given the provided instructions
-- [`createSmartTransactionWithTip()`](#createSmartTransactionWithTip): Creates a smart transaction with a Jito tip
-- [`getBundleStatuses()`](#getBundleStatuses): Gets the status of the provided bundles
-- [`sendJitoBundle()`](#sendJitoBundle): Sends a bundle of transactions to the Jito Block Engine
-- [`sendSmartTransactionWithTip()`](#sendSmartTransactionWithTip): Sends a smart transaction as a Jito bundle with a tip
+Simply create, send, and land transactions as fast as possible. Available on the `helius.tx` namespace.
 
-[**Helper methods**](#helper-methods)
+- `getComputeUnits()`: Fetches the total compute units the transaction provided is expected to consume
+- `broadcastTransaction()`: Broadcasts a fully signed transaction (object or serialized) and polls for its confirmation.
+- `pollTransactionConfirmation()`: Polls a transaction to check whether it has been confirmed
+- `createSmartTransaction()`: Creates a smart transaction with the provided configuration
+- `sendSmartTransaction()`: Builds and sends an optimized transaction
+- `sendTransaction()`: Wrapper for [`sendTransaction` RPC call](https://www.helius.dev/docs/api-reference/rpc/http/sendtransaction) that includes support for a `validatorAcls` parameter (i.e., JSON-based allow and deny lists).
+- `sendTransactionWithSender()`: Ultra-low latency Solana transaction submission via [Helius Sender](https://www.helius.dev/docs/sending-transactions/sender). Routes across multiple high-speed pathways and enters a priority auction; tip more to land first. Two tiers: **Sender Max** (`swqosOnly: false`, 0.001 SOL minimum tip) and **SWQOS-only** (`swqosOnly: true`, 0.000005 SOL minimum tip).
+- `sendBundleWithSender()`: Submits an ordered bundle of pre-signed transactions (max 5) atomically over Sender Max via the `sendBundle` method, then tracks landing per-signature with `getSignatureStatuses`. At least one transaction in the bundle must carry the 0.001 SOL Sender Max minimum tip.
 
-Offers additional tools for various Solana-related tasks like analyzing blockchain throughput and tracking stake accounts and SPL token holders.
-
-- [`getCurrentTPS()`](#getCurrentTPS): Returns the current transactions per second (TPS) rate — including voting transactions.
-- [`airdrop()`](#airdrop): Request an allocation of lamports to the specified address
-- [`getStakeAccounts()`](#getStakeAccounts): Returns all the stake accounts for a given public key.
-- [`getTokenHolders()`](#getTokenHolders): Returns all the token accounts for a given mint address (ONLY FOR SPL TOKENS).
-- [`getPriorityFeeEstimate()`](#getPriorityFeeEstimate): Returns an estimated priority fee based on a set of predefined priority levels (percentiles).
-- [`sendTransaction()`](#sendTransaction): Wrapper for `sendTransaction` RPC call that includes support for `validatorAcls` parameter.
-
-
-## DAS API (Digital Asset Standard)
-
-Read more about the DAS API from our docs, [here](https://docs.helius.dev/solana-compression/digital-asset-standard-das-api).
-
-Namespace: `helius.rpc`
-
-### getAsset()
-
-Get an asset by its ID.
+**[MEV Protect](https://www.helius.dev/docs/sending-transactions/mev-protect)** routes transactions away from validators statistically linked to sandwich attacks. It's off by default. Turn it on for a whole client with `createHelius({ apiKey, mevProtect: true })`: every send through that client is protected, including `sendTransaction`, `sendSmartTransaction`, `broadcastTransaction`, and both Sender helpers. Or set it per call on the Sender helpers, which overrides the client setting:
 
 ```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-const response = await helius.rpc.getAsset({
-  id: "F9Lw3ki3hJ7PF9HQXsBzoY8GyE6sPoEZZdXJBsTTD2rk",
-  displayOptions: {
-    showCollectionMetadata: true,
-  },
-});
-console.log(response.grouping?.map((g) => g.collection_metadata?.name));
+await helius.tx.sendTransactionWithSender({ ...args, region: "Default", mevProtect: true });
+await helius.tx.sendBundleWithSender(signedTxs, { mevProtect: true });
 ```
 
-### getAssetBatch()
+Only a small fraction of stake is excluded, so the effect on landing rate is small; for the most latency-sensitive flows, measure with and without it first.
 
-Get multiple assets by ID (up to 1k).
+[**Priority Fee API**](https://github.com/helius-labs/helius-sdk/blob/main/examples/EXAMPLES_OVERVIEW.md#helper-methods)
 
-```ts
-import { Helius } from "helius-sdk";
+Estimate optimal priority fees for Solana transactions. Available on the `helius` namespace.
 
-const ids = [
-  "F9Lw3ki3hJ7PF9HQXsBzoY8GyE6sPoEZZdXJBsTTD2rk",
-  "F9Lw3ki3hJ7PF9HQXsBzoY8GyE6sPoEZZdXJBsTTD2rk",
-];
-const helius = new Helius("your-api-key");
-const response = await helius.rpc.getAssetBatch({
-  ids: ids,
-});
-console.log(response.map((x) => x.id));
-```
+- [`getPriorityFeeEstimate()`](https://github.com/helius-labs/helius-sdk/blob/main/examples/EXAMPLES_OVERVIEW.md#getpriorityfeeestimate): Returns an estimated priority fee based on a set of predefined priority levels (percentiles).
 
-### getSignaturesForAsset()
+[**Parsed Events API**](https://www.helius.dev/docs/parsed-events)
 
-Get a list of transaction signatures related to a compressed asset.
+Parse transactions into decoded instructions, transfers, and summaries using Helius's IDL catalog (3,600+ programs). Mainnet only. Available on the `helius.parsedEvents` namespace.
 
-```ts
-import { Helius } from "helius-sdk";
+- [`parseTransactions()`](https://www.helius.dev/docs/api-reference/parsed-events/transactions): Parses up to 100 transaction signatures. Each result carries a `parserStatus`, so a missing transaction comes back as an item-level error instead of failing the request. 10 credits per request.
+- [`getTransactionHistory()`](https://www.helius.dev/docs/api-reference/parsed-events/transaction-history): Returns parsed transaction history for an address with slot and block-time bounds, paginated with `paginationToken`. Only successful transactions unless you pass `status: "any"` or `"failed"`; `tokenAccounts` adds transactions that touch only the address's token accounts. 10 credits per request.
+- [`scan()`](https://www.helius.dev/docs/api-reference/parsed-events/scan): Searches an address's history server-side for transactions that call any of up to 20 programs (optionally specific instructions, by IDL name or discriminator), touch one of up to 20 token mints (`{ mint }`; the native SOL pseudo-mint `So11111111111111111111111111111111111111111` matches lamport changes, not counting the fee), or both (both must match when both are set). By default an instruction or balance only counts when it involves the scanned address; set `scope: "transaction"` on a program or mint to count it anywhere in the transaction, for example mints when scanning a program's own address (see the `ScanMatchScope` and `ScanMintMatch` type docs for the exact rules). `returnShape` returns the parsed matches (`transactions`, the default), just their signatures (`signatures`), or only the number of matches (`count`). Takes the same filters as `getTransactionHistory`. Paginated with `paginationToken`; a request can stop early with no matches, so keep going while a token is returned (`scan.stoppedOn` says why it stopped). 10 credits plus 1 per history page scanned (a page is up to 1,000 transactions).
 
-const helius = new Helius("YOUR_API_KEY");
-const response = await helius.rpc.getSignaturesForAsset({
-  id: "Bu1DEKeawy7txbnCEJE4BU3BKLXaNAKCYcHR4XhndGss",
-  page: 1,
-});
-console.log(response.items);
-```
+All three can return each original transaction next to the parsed one: pass `rawTransaction` as `"json"`, `"jsonParsed"`, or `"base64"` (`getTransaction` encodings). `includeRawTransaction: true` still works on `parseTransactions` and `getTransactionHistory` as an alias for `rawTransaction: "json"`, but is deprecated.
 
-### searchAssets()
+[**Enhanced Transactions API**](https://www.helius.dev/docs/enhanced-transactions) **(Deprecated)**
 
-Search for assets by a variety of parameters. Very useful for token-gating!
+> **Deprecated:** the Enhanced Transactions API is in maintenance mode. Use `helius.parsedEvents` for new mainnet code — see the [migration guide](https://www.helius.dev/docs/parsed-events/guides/migrate-from-enhanced-transactions). `getTransactions` maps to `parseTransactions` and `getTransactionsByAddress` to `getTransactionHistory`, with these differences:
+>
+> - `commitment` defaults to `confirmed` (was `finalized`); pass `commitment: "finalized"` to keep the old behavior.
+> - `limit` defaults to 100 (was 10).
+> - History returns only successful transactions by default; pass `status: "any"` to include failed ones.
+> - `getTransactionHistory` requires a wallet address (program-wide history is not supported) and has no `type` / `source` filters. To search a program's history, or any history by instruction or token mint, server-side, use `parsedEvents.scan`; otherwise filter client-side on `parsed.summary.type`.
+> - Results are wrapped: `{ signature, parserStatus, parsed }`, and history pages are `{ data, paginationToken }`.
+>
+> Parsed Events is mainnet-only, so devnet code should stay on `helius.enhanced` for now.
 
-```ts
-import { Helius } from "helius-sdk";
+Transform complex Solana transactions into human-readable data. Available on the `helius.enhanced` namespace.
 
-const helius = new Helius("YOUR_API_KEY");
-const response = await helius.rpc.searchAssets({
-  ownerAddress: "2k5AXX4guW9XwRQ1AKCpAuUqgWDpQpwFfpVFh3hnm2Ha",
-  compressed: true,
-  page: 1,
-});
-console.log(response.items);
-```
+- [`getTransactions()`](https://www.helius.dev/docs/api-reference/enhanced-transactions/gettransactions): Converts raw Solana transactions into enhanced, human-readable formats with decoded instruction data and contextual information.
+- [`getTransactionsByAddress()`](https://www.helius.dev/docs/api-reference/enhanced-transactions/gettransactionsbyaddress): Retrieves a comprehensive transaction history for a given address with human-readable decoded data.
 
-### getAssetProof()
+[**Webhooks**](https://www.helius.dev/docs/webhooks)
 
-Get a merkle proof for a compressed asset by its ID.
+Provides methods for setting up, editing, and managing webhooks, crucial for listening to on-chain Solana events (e.g., sales, listings, swaps) and triggering actions when these events happen. Available on the `helius.webhooks` namespace.
 
-```ts
-import { Helius } from "helius-sdk";
+- [`createWebhook()`](https://www.helius.dev/docs/api-reference/webhooks/create-webhook): Creates a new webhook with the provided request.
+- [`getWebhookByID()`](https://www.helius.dev/docs/api-reference/webhooks/get-webhook): Retrieves a single webhook by its ID.
+- [`getAllWebhooks()`](https://www.helius.dev/docs/api-reference/webhooks/get-all-webhooks): Retrieves a list of all webhooks.
+- [`updateWebhook()`](https://www.helius.dev/docs/api-reference/webhooks/update-webhook): Edits an existing webhook by its ID with the provided request.
+- [`deleteWebhook()`](https://www.helius.dev/docs/api-reference/webhooks/delete-webhook): Deletes a webhook by its ID.
 
-const helius = new Helius("YOUR_API_KEY");
-const response = await helius.rpc.getAssetProof({
-  id: "Bu1DEKeawy7txbnCEJE4BU3BKLXaNAKCYcHR4XhndGss",
-});
-console.log(response);
-```
+[**WebSockets**](https://www.helius.dev/docs/rpc/websocket)
 
-### getAssetsByOwner()
+Stream real-time data with WebSockets using Kit's subscription methods. Available on the `helius.ws` namespace.
 
-Get a list of assets owned by an address. This is the fastest way to get all the NFTs owned by a wallet on Solana.
+- [`logsNotifications()`](https://www.helius.dev/docs/api-reference/rpc/websocket/logssubscribe): Streams transaction logs for all transactions, all transactions including votes, or transactions that mention a specific set of addresses.
+- [`slotNotifications()`](https://www.helius.dev/docs/api-reference/rpc/websocket/slotsubscribe): Streams notifications any time a slot is processed by a validator.
+- [`signatureNotifications()`](https://www.helius.dev/docs/api-reference/rpc/websocket/signaturesubscribe): Streams notifications when a transaction with the provided signature reaches the specified commitment level.
+- [`programNotifications()`](https://www.helius.dev/docs/api-reference/rpc/websocket/programsubscribe): Streams notifications when the lamports or data for an account owned by the specified program changes.
+- [`accountNotifications()`](https://www.helius.dev/docs/api-reference/rpc/websocket/accountsubscribe): Streams notifications when the lamports or data for the specified account changes.
+- `close()`: Closes an open WebSocket connection via Kit's `dispose` method, falling back to `.close()`.
 
-```ts
-import { Helius } from "helius-sdk";
+[**Enhanced WebSockets**](https://www.helius.dev/docs/websockets) (Business+ plan)
 
-const helius = new Helius("YOUR_API_KEY");
-const response = await helius.rpc.getAssetsByOwner({
-  ownerAddress: "86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY",
-  page: 1,
-});
-console.log(response.items);
-```
+Real-time filtered streaming that's 1.5-2x faster than standard WebSockets. Supports up to 50,000 address filters. Available on the `helius.ws` namespace.
 
-### getAssetsByGroup()
+- `transactionSubscribe(filter, config)`: Subscribe to real-time transaction notifications with advanced filtering (accounts, vote/failed status, signatures). Returns an `AsyncIterable` with an `unsubscribe()` method.
+- `transactionUnsubscribe(subscriptionId)`: Unsubscribe from a transaction subscription.
+- `accountSubscribe(account, config)`: Subscribe to real-time account change notifications via Enhanced WebSockets.
+- `accountUnsubscribe(subscriptionId)`: Unsubscribe from an enhanced account subscription.
 
-Get a list of assets by a group key and value. This endpoint is very useful for getting the mint list for NFT Collections.
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-const response = await helius.rpc.getAssetsByGroup({
-  groupKey: "collection",
-  groupValue: "J1S9H3QjnRtBbbuD4HjPV6RpRhwuk4zKbxsnCHuTgh9w",
-  page: 1,
-});
-console.log(response.items);
-```
-
-### getAssetsByCreator()
-
-Get a list of assets created by an address.
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-const response = await helius.rpc.getAssetsByCreator({
-  creatorAddress: "D3XrkNZz6wx6cofot7Zohsf2KSsu2ArngNk8VqU9cTY3",
-  onlyVerified: true,
-  page: 1,
-});
-console.log(response.items);
-```
-
-### getAssetsByAuthority()
-
-Get a list of assets with a specific authority.
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-const response = await helius.rpc.getAssetsByAuthority({
-  authorityAddress: "2RtGg6fsFiiF1EQzHqbd66AhW7R5bWeQGpTbv2UMkCdW",
-  page: 1,
-});
-console.log(response.items);
-```
-
-### getTokenAccounts()
-
-Get information about all token accounts for a specific mint or a specific owner.
-
-```ts
-const response = await helius.rpc.getTokenAccounts({
-  page: 1,
-  limit: 100,
-  options: {
-    showZeroBalance: false,
-  },
-  owner: "CckxW6C1CjsxYcXSiDbk7NYfPLhfqAm3kSB5LEZunnSE"
-});
-
-console.log(response);
-```
-
-### getNftEditions()
-
-Get information about all the edition NFTs for a specific master NFT.
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-const response = await helius.rpc.getNftEditions({
-  mint: "Ey2Qb8kLctbchQsMnhZs5DjY32To2QtPuXNwWvk4NosL",
-  page: 1,
-  limit: 2,
-});
-
-console.log(response);
-```
-
-## Mint
-
-To read more about the easiest way to mint cNFTs on Solana, see [our docs](https://docs.helius.dev/compression-and-das-api/mint-api).
-
-### mintCompressedNft()
-
-To mint a compressed NFT, simply call the `mintCompressedNft` method and pass in your NFT data. [This](https://xray.helius.xyz/token/UJA7Dguu6VeG3W73AyaDYQiPR9Jw9vx3XXi6CYrN224?network=mainnet) is what the mint will look like in the explorer.
-
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-const response = await helius.mintCompressedNft({
-  name: "Exodia the Forbidden One",
-  symbol: "ETFO",
-  owner: "OWNER_WALLET_ADDRESS",
-  description:
-    "Exodia the Forbidden One is a powerful, legendary creature composed of five parts: the Right Leg, Left Leg, Right Arm, Left Arm, and the Head. When all five parts are assembled, Exodia becomes an unstoppable force.",
-  attributes: [
-    {
-      trait_type: "Type",
-      value: "Legendary",
-    },
-    {
-      trait_type: "Power",
-      value: "Infinite",
-    },
-    {
-      trait_type: "Element",
-      value: "Dark",
-    },
-    {
-      trait_type: "Rarity",
-      value: "Mythical",
-    },
-  ],
-  imageUrl:
-    "https://cdna.artstation.com/p/assets/images/images/052/118/830/large/julie-almoneda-03.jpg?1658992401",
-  externalUrl: "https://www.yugioh-card.com/en/",
-  sellerFeeBasisPoints: 6900,
-});
-console.log(response.result);
-```
-
-If you want the SDK to handle the image upload, you can do so by passing in the `imagePath` and `walletPrivatekey` fields. `imagePath` is the relative path to the image, and `walletPrivatekey` is the private key of the wallet that'll pay for the image upload to Arweave.
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-const response = await helius.mintCompressedNft({
-  name: "Aggron",
-  symbol: "AGNFT",
-  owner: "OWNER_WALLET_ADDRESS",
-  description:
-    "Aggron is a powerful Steel/Rock-type Pokémon known for its iron defense.",
-  attributes: [
-    {
-      trait_type: "Type",
-      value: "Steel/Rock",
-    },
-    {
-      trait_type: "Power",
-      value: "High",
-    },
-  ],
-  externalUrl: "https://www.pokemon.com/us/pokedex/aggron",
-  imagePath: "../images/aagron.png",
-  walletPrivatekey: "YOUR_WALLET_PRIVATE_KEY",
-});
-```
-
-### delegateCollectionAuthority() and revokeCollectionAuthority()
-
-If you want to mint your cNFT to a collection:
-
-- Delegate Helius as a collection authority (using `DelegateCollectionAuthority` method), so that Helius can mint to that collection on your behalf.
-- Pass in the collection mint address in the `collection` field.
-- (Optional) Revoke collection authority (using `RevokeCollectionAuthority` method).
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-// 1. Delegate Helius as a collection authority
-await helius.delegateCollectionAuthority({
-  collectionMint: "COLLECTION_MINT_ADDRESS",
-  updateAuthorityKeypair: updateAuthorityKeypair,
-});
-
-// 2. Mint your cNFT to the collection
-const response = await helius.mintCompressedNft({
-  name: "Feitan Portor",
-  symbol: "FEITAN",
-  owner: "OWNER_WALLET_ADDRESS",
-  collection: "COLLECTION_MINT_ADDRESS",
-  description: "Feitan Portor is a member of the notorious Phantom Troupe.",
-  attributes: [
-    {
-      trait_type: "Affiliation",
-      value: "Phantom Troupe",
-    },
-    {
-      trait_type: "Nen Ability",
-      value: "Pain Packer",
-    },
-  ],
-  externalUrl: "https://hunterxhunter.fandom.com/wiki/Feitan_Portor",
-  imagePath: "../images/feitan.png",
-  walletPrivatekey: "YOUR_WALLET_PRIVATE_KEY",
-});
-
-// 3. Revoke collection authority (optional)
-await helius.revokeCollectionAuthority({
-  collectionMint: "COLLECTION_MINT_ADDRESS",
-  revokeAuthorityKeypair: revokeAuthorityKeypair,
-});
-```
-### getMintlist()
-
-To get all the tokens for an NFT collection:
-
-```ts
-import {
-  Helius
-  Collections,
-} from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-const mints = helius.getMintlist({
-  query: Collections.ABC,
-});
-```
-
-## **Webhooks**
-
-Helius webhooks are the perfect way of building event-driven systems on Solana.
-
-Simply select the transaction type(s) to detect, the accounts to watch, and the webhook handler.
-
-We've parsed over 100 transaction types (including NFT Sales, NFT Listings, and more) from over 50 different sources so you can get building ASAP.
-
-> If you don't want Helius' unique abstractions and would rather work with Solana's native data types, set `webhookType` to "raw".
-
-For a quick demo video, please see the [Webhook docs.](https://docs.helius.dev/webhooks/webhooks-summary)
-
-### createWebhook()
-
-> **Note**: You can use enum `WebhookType` to specify between raw, discord, or enhanced webhooks! The default type is "enhanced".
-
-```ts
-import {
-  // enums
-  Address,
-  TransactionType,
-
-  // lib
-  Helius,
-} from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-helius.createWebhook({
-  accountAddresses: [Address.MAGIC_EDEN_V2],
-  transactionTypes: [TransactionType.NFT_LISTING],
-  webhookURL: "my-webhook-handler.com/handle",
-});
-```
-
-If you'd like to work with the native Solana transaction format instead of Helius' abstraction, use the "raw" type instead (this will also have lower latency). Note we also add an auth-header for security purposes.
-
-```ts
-import {
-  // enums
-  TransactionType,
-  WebhookType,
-  Address,
-  Helius,
-} from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-helius.createWebhook({
-  accountAddresses: [Address.MAGIC_EDEN_V2],
-  authHeader: "some auth header",
-  webhookURL: "my-webhook-handler.com/handle",
-  webhookType: WebhookType.RAW,
-  transactionTypes: [TransactionType.ANY],
-});
-```
-
-For Discord webhooks, simply use enum `WebhookType.DISCORD`.
-
-### editWebhook()
-
-You can also edit your webhooks. A common use case is dynamically adding/removing accounts to watch in a webhook:
-
-```ts
-import { Helius, Address } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-helius.editWebhook(
-  "your-webhook-id-here",
-  { accountAddresses: [Address.SQUADS] } // This will ONLY update accountAddresses, not the other fields on the webhook object
-);
-```
-
-> **Very important**: The `editWebhook` method will completely overwrite the existing values for the field(s) that you inputted. Make sure to fetch the existing webhook and merge the values to avoid this.
-
-### appendAddressesToWebhook()
-
-For convenience, we've added a method to let you simply append new addresses to an existing webhook:
-
-```ts
-import { Helius, Address } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-helius.appendAddressesToWebhook("your-webhook-id-here", [
-  Address.SQUADS,
-  Address.JUPITER_V3,
-]);
-```
-
-### removeAddressesFromWebhook()
-
-For convenience, we've added a method to let you simply remove addresses from an existing webhook:
-
-```ts
-import { Helius, Address } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-helius.removeAddressesFromWebhook("your-webhook-id-here", [
-  Address.SQUADS,
-  Address.JUPITER_V3,
-]);
-```
-
-### getAllWebhooks()
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-helius.getAllWebhooks();
-```
-
-### getWebhookByID()
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-helius.getWebhookByID("<webhook-id-here>");
-```
-
-### deleteWebhook()
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-helius.deleteWebhook("<webhook-id-here>"); // returns a boolean
-```
-
-### createCollectionWebhook()
-
-```ts
-import {
-  // collections dict
-  Collections,
-  Helius,
-} from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-helius.createCollectionWebhook({
-  collectionQuery: Collections.ABC,
-  transactionTypes: [Types.TransactionType.ANY],
-  webhookType: Types.WebhookType.DISCORD,
-  webhookURL: "https://discord.com/api/webhooks/your-discord-token-here",
-});
-```
-
-Note that the Collections.ABC enum references the collection query for this collection. It is just a convenience enum so that developers don't have to figure out whether to use firstVerifiedCreator or the Metaplex Certified Collection address. If you already know it for your collection, please make a PR.
-
-## Helper methods
-
-We provide a variety of helper methods to help make Solana RPCs easier to work with.
-
-### getCurrentTPS()
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-const tps = await helius.rpc.getCurrentTPS();
-```
-
-### airdrop()
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-const response = await helius.rpc.airdrop(
-  new PublicKey("<wallet address>"),
-  1000000000
-); // 1 sol
-```
-
-### getStakeAccounts()
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-const response = await helius.rpc.getStakeAccounts("<wallet address>");
-```
-
-### getTokenHolders()
-
-```ts
-import { Helius } from "helius-sdk";
-
-const helius = new Helius("YOUR_API_KEY");
-
-const response = await helius.rpc.getTokenHolders("<token mint address>");
-```
-
-### getPriorityFeeEstimate()
-This method considers both global and local fee markets in the estimation. Users can also specify to receive all the priority levels and adjust the window with which these levels are calculated via `lookbackSlots`
-
-```ts
-import { Helius } from "helius-sdk";
-const helius = new Helius("YOUR_API_KEY");
-
-const response = await helius.rpc.getPriorityFeeEstimate({
-  accountKeys: ["JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"],
-  options: {
-    includeAllPriorityFeeLevels: true,
+```typescript
+const sub = await helius.ws.transactionSubscribe(
+  { accountInclude: ["EPjF..."] },
+  // Required when transactionDetails is "accounts" or "full";
+  // 1 also opts in to v1 (SIMD-0385) transactions
+  {
+    commitment: "confirmed",
+    encoding: "jsonParsed",
+    maxSupportedTransactionVersion: 1,
   }
+);
+for await (const notif of sub) {
+  console.log(notif.signature, notif.slot);
+}
+await sub.unsubscribe();
+```
+
+[**Parsed Streams**](https://www.helius.dev/docs/parsed-streams)
+
+Decoded transactions pushed in real time, filtered on the server by program, instruction name, account, or account role. The streaming counterpart to Parsed Events and the successor to enhanced transaction webhooks; notifications use the same transfer and summary shapes as Parsed Events. Available on all plans at 1 credit per delivered event. Use the standalone `makeParsedStreamsClient` from `helius-sdk/websockets/parsedStreams`.
+
+- `parsedTransactionSubscribe(filter, options?)`: Subscribe with a filter (`programs`, `instructionNames`, `accounts.include`, `accounts.roles`, `includeFailed`, `includeCpi`). `options.details` is `"full"` (default: whole transaction plus `matchedIndexes`), `"matched"` (only matching instructions), or `"raw"` (matching instructions as base58 data). Returns an `AsyncIterable` of `{ context: { slot }, value }` with an `unsubscribe()` method; leaving a `for await` loop also unsubscribes.
+- `parsedTransactionUnsubscribe(subscriptionId)`: Unsubscribe by id.
+- `describeProgram(program)`: List a program's exact instruction names, events, and account roles, so filters match what you expect. Pass the program address rather than a name.
+- `close()`: Close the connection and end every subscription.
+
+Delivery is **at most once**: the server doesn't replay what confirmed while a connection was down, and it closes connections routinely (10 minutes without a match, deploys, network edge recycling). The client reconnects with backoff and resubscribes every filter on its own, and `onReconnect` reports the last slot it delivered so you can backfill the gap from RPC. A slow consumer (more than 2048 notifications behind, close code 1008) ends the stream with an error instead. Client messages are paced to the server's 10-per-second limit, and each connection holds up to 25 subscriptions.
+
+```typescript
+import { makeParsedStreamsClient } from "helius-sdk/websockets/parsedStreams";
+
+const streams = makeParsedStreamsClient(apiKey, {
+  onReconnect: ({ lastSlot }) => console.warn("backfill after slot", lastSlot),
 });
 
-console.log(response);
-```
-
-### sendSmartTransaction()
-This method builds and sends an optimized transaction, while handling its confirmation status. Whether the transaction skips preflight checks and how many times it is retried is configurable by the user. The following code snippet is an example of sending 0.5 SOL to a given public key, with an optimize transaction that skips preflight checks:
-
-```ts
-import { Helius } from "helius-sdk";
-import {
-  Keypair,
-  SystemProgram,
-  LAMPORTS_PER_SOL,
-  TransactionInstruction,
-} from "@solana/web3.js";
-
-const helius = new Helius("YOUR_API_KEY");
-
-const fromKeypair = /* Your keypair goes here */;
-const fromPubkey = fromKeypair.publicKey;
-const toPubkey = /* The person we're sending 0.5 SOL to */;
-
-const instructions: TransactionInstruction[] = [
-  SystemProgram.transfer({
-    fromPubkey: fromPubkey,
-    toPubkey: toPubkey,
-    lamports: 0.5 * LAMPORTS_PER_SOL, 
-  }),
-];
-
-const transactionSignature = await helius.rpc.sendSmartTransaction(instructions, [fromKeypair], [], { skipPreflight: true });
-console.log(`Successful transfer: ${transactionSignature}`);
-```
-
-### createSmartTransaction()
-The smart transaction creation functionality has been abstracted out of `sendSmartTransaction` and is available with the `createSmartTransaction()` method. It takes in an array of instructions, signers, lookup tables, and an optional fee payer. It returns an object containing the smart transaction (i.e., `Transaction | VersionedTransaction`) as well as the `lastValidBlockHeight`:
-
-```ts
-const { smartTransaction: transaction, lastValidBlockHeight } = await helius.rpc.createSmartTransaction(instructions, signers, lookupTables, feePayer);
-```
-
-### getComputeUnits()
-This method simulates a transaction to get the total compute units consumed. It takes in an array of instructions, a fee payer, an array of lookup tables, and an array of signers. It returns the compute units consumed, or null if unsuccessful:
-
-```ts
-const units = helius.rpc.getComputeUnits(instructions, payerKey, [], []);
-```
-
-### pollTransactionConfirmation()
-This method polls a transaction to check whether it has been confirmed. It takes in a `TransactionSignature` and checks whether it has been confirmed within the timeout period. Currently, this method defaults to a 15 second timeout and a 5 second retry interval, so it polls 3 times over 15 seconds. However, with `PollTransactionOptions`, these values can be changed in addition to the confirmation status. It returns the confirmed transaction signature or an error if the confirmation times out:
-
-```ts
-let txSig = await helius.connection().sendRawTransaction(transaction.serialize(), {
-  skipPreflight: true,
-  ...sendOptions
+const sub = await streams.parsedTransactionSubscribe({
+  programs: ["JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"],
 });
-
-return await helius.rpc.pollTransactionConfirmation(txSig);
-```
-
-### sendSmartTransactionWithTip()
-This method has the same functionality as `sendSmartTransaction`. However, it sends the optimized transaction as a bundle and includes a tip so it is processed by Jito's Block Engine. The following code snippet sends 0.05 SOL to a given public key with a Jito tip of 100k lamports using Jito's New York API URL:
-
-```ts
-import { Helius } from "helius-sdk";
-import {
-  Keypair,
-  SystemProgram,
-  LAMPORTS_PER_SOL,
-  TransactionInstruction,
-} from "@solana/web3.js";
-
-const helius = new Helius("YOUR_API_KEY");
-
-const fromKeypair = /* Your keypair goes here */;
-const fromPubkey = fromKeypair.publicKey;
-const toPubkey = /* The person we're sending 0.05 SOL to */;
-
-const instructions: TransactionInstruction[] = [
-  SystemProgram.transfer({
-    fromPubkey: fromPubkey,
-    toPubkey: toPubkey,
-    lamports: 0.05 * LAMPORTS_PER_SOL, 
-  }),
-];
-
-// Call the sendSmartTransactionWithTip function
-const bundleId = await helius.rpc.sendSmartTransactionWithTip(instructions, [keypair], address_lut, 100000, "NY");
-console.log(`Bundle sent successfully with ID: ${bundleId}`);
-```
-
-### createSmartTransactionWithTip()
-Similarly to `createSmartTransaction`, the smart transaction creation functionality for smart transactions with tips has been abstracted out of `sendSmartTransactionWithTip` and is available with the `createSmartTransactionWithTip` method. It takes in an array of instructions, signers, lookup tables, as well as a tip amount and an optional fee payer. The tip amount defaults to 1000 lamports — the minimum specified in [Jito's documentation](https://jito-labs.gitbook.io/mev/searcher-resources/bundles#tip-guidelines). It returns the serialized transaction as a string, and the `lastValidBlockHeight`. The reason we return the transaction as a string is because the `sendJitoBundle` method requires a serialzied transaction:
-
-```ts
-const { serializedTransaction, lastValidBlockHeight } = await this.createSmartTransactionWithTip(instructions, signers, lookupTables, tipAmount, feePayer);
-```
-
-### addTipInstruction()
-This method adds a tip instruction to the last instruction in the set of provided instructions. It is a transfer instruction that sends the specified amount of lamports from the fee payer to the designated tip account.
-
-```ts
-const randomTipAccount = JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)];
-const tipAmount = 10000;
-
-helius.rpc.addTipInstruction(instructions, feePayer, randomTipAccount, tipAmount);
-```
-
-### sendJitoBundle()
-This method sends a bundle of transactions to the Jito Block Engine. It takes in an array of serialized transactions and a Jito Block Engine API URL. It returns the bundle ID as a string.
-
-```ts
-const jitoApiUrl = 'https://mainnet.block-engine.jito.wtf/api/v1/bundles';
-const bundleId = helius.rpc.sendJitoBundle([serializedTransactions], jitoApiUrl);
-```
-
-### getBundleStatuses()
-This method gets the status of Jito bundles. It takes in an array of bundle IDs and a Jito Block Engine API URL. It returns the status of the bundles.
-
-```ts
-const bundleIds = [ /* Bundle IDs */];
-const jitoApiUrl = 'https://mainnet.block-engine.jito.wtf/api/v1/bundles';
-const statuses = helius.rpc.getBundleStatuses(bundleIds, jitoApiUrl);
-```
-
-### sendTransaction()
-This method behaves the same way as the standard `sendTransaction`, but adds support for `validatorAcls` JSON-based allow/denylists.
-
-```ts
-try {
-    const response = await helius.rpc.sendTransaction(
-        transaction,
-        {
-            validatorAcls: [SFDP_REJECTS_URL],
-            skipPreflight: true,
-        },
-    );
-} catch (error) {
-    console.error(error);
+for await (const { value } of sub) {
+  for (const i of value.matchedIndexes ?? []) {
+    const ix = value.instructions[i];
+    console.log(value.transaction.signature, ix.instructionName, ix.decoded?.args);
+  }
 }
 ```
 
-## helius.connection
+> **Note:** On Node 20, which has no global `WebSocket`, pass one from the `ws` package: `makeParsedStreamsClient(apiKey, { WebSocket })`.
 
-> [!WARNING]   
-> This uses Solana-Web3.js version 1.73.2
+[**Pre Confirmations**](https://www.helius.dev/docs/pre-confirmations/overview) (`preconfSubscribe`)
 
-Incorporates all commonly-used methods from Solana-Web3.js Provider using your Helius RPC. Ideal for managing connections and performing standard Solana blockchain operations. For a list of all the Methods see: https://docs.solana.com/api/http
+Helius's lowest-latency transaction stream: scheduled transactions are delivered over WebSocket **before** they are shredded, from two sources — Helius preconfirmations (emitted when the leader executes the transaction, with its status) and [BAM](https://www.helius.dev/docs/pre-confirmations/overview#bam-preconfirmations) preconfirmations (emitted when the validator commits to executing it). A pre-confirmation is an **early signal, not a guarantee** — a streamed transaction may still fail to land. Coverage is **not continuous**: it scales with the share of stake covered by the two sources, so expect gaps. Professional plan or higher; 10 credits per message, with a **minimum of 300 credits per covered slot for each open subscription** — filter server-side and unsubscribe streams you don't need ([pricing](https://www.helius.dev/docs/pre-confirmations/overview#pricing)). Use the standalone `makePreconfWsClient` (or `makePreconfWsClientForApiKey`) from `helius-sdk/websockets/preconfWs`.
 
-```ts
-import { Helius } from "helius-sdk";
+- `preconfSubscribe(filter?, options?)`: Subscribe to Pre Confirmations, optionally filtered server-side, so you only receive what matches. Each open subscription is still billed at least 300 credits per covered slot, even with no matches. Omit the filter to stream every transaction from both sources. Filter fields, combined with AND: `includeSource` (`["helius"]` for Helius only; omitted or `[]` means both; replaces the deprecated `includeBam`, and the two can't be combined), `failed`, `regionInclude` (region codes such as `"ewr"`, `"fra"`), `accountInclude` / `accountExclude` / `accountRequired` (lookup tables resolved server-side), `signerInclude` / `signerExclude`, `signatures`, and `instructions` (top-level, by `programId` plus `memcmp` / `dataSize`). Returns an `AsyncIterable` of transaction notifications `{ type: "transaction", version, slot, transactionIndex, status, transaction, transactionBytes }` with an `unsubscribe()` method; leaving a `for await` loop early also unsubscribes. Pass `{ slots: true }` as `options` to also receive leader-bank slot events `{ type: "slot", version, slot, status }`, and narrow each notification on `type`. Slot events are subject to `includeSource` and `regionInclude` only, and carry no ordering guarantee relative to their slot's transactions. Each subscription uses its own connection, because notification frames don't identify their subscription.
+- `preconfUnsubscribe(subscriptionId)`: Unsubscribe by id. Each subscription owns its connection, so this closes it, which removes the subscription server-side; resolves `true` if it was live. Prefer `sub.unsubscribe()`, which always targets its own connection; as a safety net this throws if several live subscriptions report the same id.
+- `getPreConfCoverage()`: Current coverage — `networkSharePercent` of stake and `coverageByRegion`. Coverage is by stake, for both sources, regardless of filters.
 
-// Replace YOUR_API_KEY with the API key from your Helius dashboard
-const helius = new Helius("YOUR_API_KEY"); 
+Notifications are **binary** frames (the subscribe ack is a JSON text frame), little-endian. The `version` byte is checked first; unknown versions throw and are dropped.
 
-const getBlockHeight = async () => {
-  const response = await helius.connection.getBlockHeight();
-  console.log(response);
+- Version `1`, a transaction: `version:u8 | slot:u64_le | transaction_index:u64_le | status:u8 | transaction`. `status` is the `PreconfStatus` enum (`Failed = 0`, `Success = 1`, `Unknown = 2`). Transactions are in Solana wire format (legacy, v0, or v1) and decode with `@solana/kit`. BAM preconfirmations always carry `transactionIndex = 0` and status `Unknown`, and the frame has no source field.
+- Version `128`, a slot event, delivered only with `{ slots: true }`: `version:u8 | slot:u64_le | status:u8`. `status` is the `PreconfSlotStatus` enum (`BankCreated = 0`, the slot started; `BankFrozen = 1`, the slot ended). A slot event with any other status is dropped.
+
+`decodePreconfFrame` decodes a transaction frame and throws on a slot frame; `decodePreconfEvent` decodes either.
+
+```typescript
+import {
+  makePreconfWsClientForApiKey,
+  PreconfSlotStatus,
+} from "helius-sdk/websockets/preconfWs";
+
+const client = makePreconfWsClientForApiKey(apiKey);
+const [coverage, sub] = await Promise.all([
+  client.getPreConfCoverage(), // Concurrent, so it doesn't delay the stream
+  client.preconfSubscribe(
+    {
+      includeSource: ["helius"], // Helius preconfirmations only
+      failed: false, // Successful transactions only
+      accountInclude: ["9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"],
+    },
+    { slots: true } // Also deliver slot events; omit for transactions only
+  ),
+]);
+console.log(`Covering ${coverage.networkSharePercent}% of stake`);
+for await (const event of sub) {
+  if (event.type === "slot") {
+    const started = event.status === PreconfSlotStatus.BankCreated;
+    console.log(`slot ${event.slot} ${started ? "bank created" : "bank frozen"}`);
+    continue;
+  }
+  // event.transaction is the decoded @solana/kit Transaction; event.transactionBytes is the raw wire-format transaction
+  console.log(event.version, event.slot, event.transactionIndex, event.status);
 }
-
-getBlockHeight();
+await sub.unsubscribe();
+client.close();
 ```
 
-## FAQ
+> **Note:** The Pre Confirmations stream is served from the Gatekeeper endpoint (`wss://beta.helius-rpc.com/?api-key=<KEY>`). Despite the `beta` host name this is the production path. On Node 20, which has no global `WebSocket`, pass one from the `ws` package: `makePreconfWsClientForApiKey(apiKey, { WebSocket })`.
 
-Q: I get an error stating `Cannot use import statement outside a module`  
-A: In the `package.json` file add `"type": "module"`. Adding this enables ES6 modules.
+[**ZK Compression**](https://github.com/helius-labs/helius-sdk/blob/main/examples/EXAMPLES_OVERVIEW.md#helper-methods)
+
+Estimate optimal priority fees for Solana transactions. Available on the `helius.zk` namespace.
+
+- [`getSignaturesForAsset()`](https://www.helius.dev/docs/api-reference/das/getsignaturesforasset): Retrieves a complete chronological history of all transactions involving the provided compressed NFT (cNFT).
+- [`getCompressedAccount()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressedaccount): Returns the compressed account for the address or hash provided.
+- [`getCompressedAccountProof()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressedaccountproof): Returns a proof the compression program uses to verify that the given account is valid.
+- [`getCompressedAccountsByOwner()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressedaccountsbyowner): Returns the owner’s compressed accounts.
+- [`getCompressedBalance()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressedbalance): Returns the balance for the compressed account with the given address or hash.
+- [`getCompressedBalanceByOwner()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressedbalancebyowner): Returns the total balance of the owner’s compressed accounts.
+- [`getCompressedMintTokenHolders()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressedminttokenholders): Returns the owner balances for a given mint in descending order.
+- [`getCompressedTokenAccountBalance()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressedtokenaccountbalance): Returns the balance for a given token account.
+- [`getCompressedTokenAccountsByDelegate()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressedtokenaccountsbydelegate): Returns the compressed token accounts that are partially or fully delegated to the given delegate.
+- [`getCompressedTokenAccountsByOwner()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressedtokenaccountsbyowner): Returns the compressed token accounts owned by a certain account.
+- [`getCompressedTokenBalancesByOwner()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressedtokenbalancesbyowner): Returns the token balances for a given owner.
+- [`getCompressedTokenBalancesByOwnerV2()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressedtokenbalancesbyownerv2): Returns the token balances for a given owner. The V2 version solves a minor naming issue.
+- [`getCompressionSignaturesForAccount()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressionsignaturesforaccount): Return the signatures of the transactions that closed or opened a compressed account with the given hash.
+- [`getCompressionSignaturesForAddress()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressionsignaturesforaddress): Return the signatures of the transactions that closed or opened a compressed account with the given address.
+- [`getCompressionSignaturesForOwner()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressionsignaturesforowner): Returns the signatures of the transactions that have modified an owner’s compressed accounts.
+- [`getCompressionSignaturesForTokenOwner()`](https://www.helius.dev/docs/api-reference/zk-compression/getcompressionsignaturesfortokenowner): Returns the signatures of the transactions that have modified an owner’s compressed token accounts.
+- [`getIndexerHealth()`](https://www.helius.dev/docs/api-reference/zk-compression/getindexerhealth): Returns an error if the indexer is stale by more than a configurable number of blocks. Otherwise, it returns `ok`.
+- [`getIndexerSlot()`](https://www.helius.dev/docs/api-reference/zk-compression/getindexerslot): Returns the slot of the last block indexed by the indexer.
+- [`getLatestCompressionSignatures()`](https://www.helius.dev/docs/api-reference/zk-compression/getlatestcompressionsignatures): Returns the signatures of the latest transactions that used the compression program.
+- [`getLatestNonVotingSignatures()`](https://www.helius.dev/docs/api-reference/zk-compression/getlatestnonvotingsignatures): Returns the signatures of the latest transactions that are not voting transactions.
+- [`getMultipleCompressedAccountProofs()`](https://www.helius.dev/docs/api-reference/zk-compression/getmultiplecompressedaccountproofs): Returns multiple proofs used by the compression program to verify the accounts’ validity.
+- [`getMultipleCompressedAccounts()`](https://www.helius.dev/docs/api-reference/zk-compression/getmultiplecompressedaccounts): Returns multiple compressed accounts with the given addresses or hashes.
+- [`getMultipleNewAddressProofs()`](https://www.helius.dev/docs/api-reference/zk-compression/getmultiplenewaddressproofs): Returns proofs that the new addresses are not taken already and can be created.
+- [`getMultipleNewAddressProofsV2()`](https://www.helius.dev/docs/api-reference/zk-compression/getmultiplenewaddressProofsv2): Returns proofs that the new addresses are not taken already and can be created.
+- [`getTransactionWithCompressionInfo()`](https://www.helius.dev/docs/api-reference/zk-compression/gettransactionwithcompressioninfo): Returns the transaction data for the transaction with the given signature along with parsed compression info.
+- [`getValidityProof()`](https://www.helius.dev/docs/api-reference/zk-compression/getvalidityproof): Returns a single ZK Proof used by the compression program to verify that the given accounts are valid and that the new addresses can be created.
+
+[**Wallet API**](https://www.helius.dev/docs/wallet-api) **(Beta)**
+
+Query wallet data including identity, balances, history, and transfers. Available on the `helius.wallet` namespace.
+
+- [`getIdentity()`](https://www.helius.dev/docs/api-reference/wallet-api/identity): Get wallet identity for known addresses (e.g., exchanges, protocols)
+- [`getBatchIdentity()`](https://www.helius.dev/docs/api-reference/wallet-api/identity): Batch identity lookup for up to 100 addresses
+- [`getBalances()`](https://www.helius.dev/docs/api-reference/wallet-api/balances): Get all token and NFT balances with USD values and pagination
+- [`getBalanceAt()`](https://www.helius.dev/docs/api-reference/wallet-api/balance-at): Get a wallet's balance of a specific token or native SOL at a past timestamp, datetime, or slot
+- [`getHistory()`](https://www.helius.dev/docs/api-reference/wallet-api/history): Fetch transaction history with balance changes and pagination
+- [`getTransfers()`](https://www.helius.dev/docs/api-reference/wallet-api/transfers): Get all token transfer activity with sender/recipient information
+- [`getFundedBy()`](https://www.helius.dev/docs/api-reference/wallet-api/funded-by): Discover the original funding source for a wallet
+
+[**Admin API**](https://www.helius.dev/docs/admin-api)
+
+Query project-level administrative data that is authenticated with an API key and served from `https://admin-api.helius.xyz/v0`. Available on the `helius.admin` namespace.
+
+Admin API access is feature-gated per project. The API key must belong to the same project as the `projectId` you request.
+
+- [`getProjectUsage(projectId)`](https://www.helius.dev/docs/api-reference/admin-api/project-usage): Get current billing-period credit usage, remaining credits, prepaid credits, and per-product usage breakdown for a project.
+
+Examples:
+
+- [`examples/admin/getProjectUsage.ts`](https://github.com/helius-labs/helius-sdk/blob/main/examples/admin/getProjectUsage.ts): Use the root SDK client via `createHelius({ apiKey })`
+- [`examples/admin/makeAdminClient.ts`](https://github.com/helius-labs/helius-sdk/blob/main/examples/admin/makeAdminClient.ts): Use the direct admin client import via `helius-sdk/admin/client`

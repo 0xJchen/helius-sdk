@@ -1,0 +1,90 @@
+import { getSDKHeaders } from "../http";
+import type { ParsedEventsNetworkOptions } from "./types";
+
+/** Base URL for Parsed Events endpoints. Parsed Events is mainnet-only. */
+const BASE_URL = "https://mainnet.helius-rpc.com/v1/parsed-events";
+
+// A "devnet" hostname label: devnet.helius-rpc.com, abc-fast-devnet.helius-rpc.com,
+// api.devnet.solana.com, my-devnet-proxy.example.com
+const DEVNET_HOST = /(^|[.-])devnet([.-]|$)/;
+
+/** Whether a client's `baseUrl` points at a devnet host */
+export const isDevnetHost = (baseUrl?: string): boolean => {
+  try {
+    return !!baseUrl && DEVNET_HOST.test(new URL(baseUrl).hostname);
+  } catch {
+    // Unparseable baseUrl: no host to classify
+    return false;
+  }
+};
+
+/**
+ * Build a guard that throws unless the client targets mainnet, so a devnet
+ * client never silently gets mainnet data. Either signal means devnet: a
+ * `network` other than `"mainnet"`, or a `baseUrl` whose host names devnet.
+ * Resolved once per client, since the options cannot change.
+ */
+export const mainnetGuard = ({
+  network = "mainnet",
+  baseUrl,
+}: ParsedEventsNetworkOptions): (() => void) => {
+  const mainnet = network === "mainnet" && !isDevnetHost(baseUrl);
+
+  return () => {
+    if (!mainnet) {
+      throw new Error("Parsed Events is only available on mainnet.");
+    }
+  };
+};
+
+/**
+ * POST a JSON body to a Parsed Events endpoint and return the parsed response
+ *
+ * `null` fields are dropped at every object level, since the API types every
+ * optional field as non-nullable. Values are otherwise sent as given (after
+ * `toJSON`), so a malformed one still reaches the API to be rejected.
+ *
+ * @throws Error with the HTTP status and the API's `error` message on a non-2xx response
+ */
+export const postParsedEvents = async <T>(
+  path: string,
+  apiKey: string,
+  body: unknown,
+  userAgent?: string
+): Promise<T> => {
+  const url = `${BASE_URL}/${path}?api-key=${encodeURIComponent(apiKey)}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...getSDKHeaders(userAgent),
+    },
+    // A replacer runs after toJSON; in arrays an `undefined` still becomes null
+    body: JSON.stringify(body, (_key, value) =>
+      value === null ? undefined : value
+    ),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    let message = text || res.statusText;
+    try {
+      // Parsed Events returns `{ error: string }`; the RPC gateway (auth,
+      // rate limits) returns a JSON-RPC style `{ error: { message } }` or a
+      // bare `{ message }`
+      const json = JSON.parse(text);
+      const error = json?.error;
+      message =
+        (typeof error === "string" ? error : error?.message) ||
+        json?.message ||
+        res.statusText ||
+        text;
+    } catch {
+      // Non-JSON error body (e.g. a gateway error page); keep the raw text
+    }
+    throw new Error(`Helius HTTP ${res.status}: ${message}`);
+  }
+
+  return (await res.json()) as T;
+};

@@ -1,0 +1,474 @@
+---
+last_updated: 2026-05-05
+---
+
+# Helius SDK
+
+> The Helius TypeScript SDK for Solana development. Use this SDK when building applications that need to interact with Solana.
+
+## What is the Helius TypeScript SDK?
+
+The Helius TypeScript SDK provides access to Helius APIs and enhanced Solana RPC functionality. It simplifies Solana development with high-level abstractions for assets, transactions, webhooks, staking, and ZK compression.
+
+- Package: `helius-sdk` (npm/pnpm/yarn)
+- Version: 2.x (uses @solana/kit, not @solana/web3.js)
+- Runtime: Node.js 20+, browsers, Deno
+- TypeScript: 5.8+ (full type definitions included)
+- API Key: Required (get from https://dashboard.helius.dev)
+- License: ISC
+
+### Agent Account Sign Up
+
+> **For AI Agents:** You can create a Helius account and generate an API key programmatically using the helius-cli. See the [agent signup guide](https://www.helius.dev/docs/api-reference/helius-cli.md) or [helius-cli agent file](https://dashboard.helius.dev/agents.md) for complete details.
+
+## When to Use the Helius TypeScript SDK
+
+Use the Helius TypeScript SDK when you need to:
+
+- Fetch NFTs, tokens, or compressed NFTs owned by a wallet
+- Get the entire transaction history for an address (including token accounts)
+- Send transactions with ultra-low latency via Helius Sender
+- Set up webhooks for on-chain events (sales, transfers, swaps)
+- Stake SOL programmatically
+- Work with ZK compressed accounts
+- Stream real-time blockchain data via WebSockets
+- Make RPC calls on Solana's most performant infrastructure
+
+## Quick Start
+
+```typescript
+import { createHelius } from "helius-sdk";
+
+const helius = createHelius({
+  apiKey: "your-api-key", // Get from https://dashboard.helius.dev
+  network: "mainnet",     // or "devnet"
+});
+
+// Get all NFTs owned by a wallet
+const assets = await helius.getAssetsByOwner({
+  ownerAddress: "wallet_address",
+  page: 1,
+  limit: 50,
+});
+
+// Get transaction history
+const txs = await helius.getTransactionsForAddress([
+  "wallet_address",
+  { limit: 10, transactionDetails: "full", maxSupportedTransactionVersion: 1 }
+]);
+
+// Get parsed token and native SOL transfer history
+const transfers = await helius.getTransfersByAddress([
+  "wallet_address",
+  { limit: 10, direction: "in", mint: "token_mint" }
+]);
+```
+
+## Examples Directory
+
+The `examples/` directory contains working code samples for every method in the SDK, organized by namespace:
+
+```
+examples/
+├── helius/das/       # DAS API: getAsset, getAssetsByOwner, searchAssets, etc.
+├── helius/           # RPC V2: getProgramAccountsV2, getTransactionsForAddress, getTransfersByAddress, etc.
+├── transactions/     # Helius Sender, smart transactions, sendTransaction
+├── parsedEvents/     # Parsed Events transaction parsing
+├── enhanced/         # Enhanced transaction parsing (deprecated)
+├── webhooks/         # Webhook CRUD operations
+├── websockets/       # WebSocket subscriptions
+├── staking/          # Staking operations
+└── zk/               # ZK Compression methods
+```
+
+Each example is a standalone TypeScript file showing real-world usage patterns. When implementing a feature, reference the corresponding example file for the correct method signature and options.
+
+Browse examples: https://github.com/helius-labs/helius-sdk/tree/main/examples
+
+## Core Capabilities
+
+### DAS API (Digital Asset Standard)
+Query NFTs, tokens, and compressed NFTs on Solana.
+
+```typescript
+// Get a single asset by ID
+const asset = await helius.getAsset({ id: "asset_id" });
+
+// Get all assets owned by a wallet (NFTs + tokens)
+const assets = await helius.getAssetsByOwner({ ownerAddress: "...", page: 1 });
+
+// Get assets by creator, authority, or collection
+const byCreator = await helius.getAssetsByCreator({ creatorAddress: "..." });
+const byGroup = await helius.getAssetsByGroup({ groupKey: "collection", groupValue: "..." });
+
+// Search with filters
+const results = await helius.searchAssets({ ownerAddress: "...", tokenType: "fungible" });
+
+// Get Merkle proofs for compressed NFTs
+const proof = await helius.getAssetProof({ id: "cnft_id" });
+```
+
+### Transactions & Helius Sender
+Build, optimize, and send transactions with ultra-low latency via Helius Sender.
+
+```typescript
+// Helius Sender: Ultra-low latency transaction submission
+// Multi-region routing to validators and Jito infrastructure
+const signature = await helius.tx.sendTransactionWithSender({
+  instructions: [transferInstruction],
+  signers: [walletSigner],
+  commitment: "confirmed",
+  minUnits: 1_000,
+  bufferPct: 0.1,
+  // Sender-specific options
+  region: "US_EAST",              // US_EAST, US_WEST, EU, ASIA
+  swqosOnly: true,                // Route only through SWQOS infra
+  mevProtect: true,               // Avoid sandwich-linked validators (or set on createHelius)
+  pollTimeoutMs: 60_000,
+  pollIntervalMs: 2_000,
+});
+
+// Smart transaction (auto compute units + priority fees)
+const sig = await helius.tx.sendSmartTransaction({
+  instructions: [transferInstruction],
+  signers: [walletSigner],
+  commitment: "confirmed",
+});
+
+// Get priority fee estimate
+const fee = await helius.getPriorityFeeEstimate({
+  accountKeys: ["program_id"],
+  options: { priorityLevel: "High" }
+});
+```
+
+### RPC V2 Methods
+Enhanced RPC methods with advanced filtering and pagination.
+
+```typescript
+// Get transaction history with filters
+const txs = await helius.getTransactionsForAddress([
+  "wallet_address",
+  {
+    limit: 10,
+    transactionDetails: "full",       // "full" | "signatures" (default)
+    maxSupportedTransactionVersion: 1, // Include versioned (v0/v1) transactions
+    sortOrder: "desc",                // "asc" | "desc"
+    filters: {
+      blockTime: { gte: unixTimestamp },  // Filter by time
+      slot: { gte: 100000000 },           // Filter by slot
+      tokenAccounts: "balanceChanged",    // Include token account txs
+    },
+  },
+]);
+
+// Paginate through results
+const page1 = await helius.getTransactionsForAddress(["address", { limit: 100 }]);
+const page2 = await helius.getTransactionsForAddress([
+  "address",
+  { limit: 100, paginationToken: page1.paginationToken }
+]);
+
+// Get parsed token and native SOL transfers with filters
+const transfers = await helius.getTransfersByAddress([
+  "address",
+  {
+    limit: 100,
+    direction: "out",
+    filters: {
+      blockTime: { gte: unixTimestamp },
+    },
+  },
+]);
+
+// Get all program accounts with cursor pagination
+const accounts = await helius.getProgramAccountsV2([
+  programId,
+  { encoding: "base64", limit: 1000 }
+]);
+```
+
+### Parsed Events
+Parse transactions into decoded instructions, transfers, and summaries (mainnet only). Successor to Enhanced Transactions (`helius.enhanced`, deprecated).
+
+```typescript
+const results = await helius.parsedEvents.parseTransactions({
+  transactions: ["tx_signature_1", "tx_signature_2"]
+});
+// One result per signature, in order. Check parserStatus before reading parsed.
+for (const r of results) {
+  if (r.parserStatus === "OK") console.log(r.parsed.summary?.description);
+}
+
+// Address history, paginated with paginationToken
+const page = await helius.parsedEvents.getTransactionHistory({
+  address: "wallet_address",
+  limit: 100,
+  time: { gte: 1767225600 }
+});
+
+// Server-side search of an address's history by program instruction and/or
+// token mint. A request can stop early with no matches (scan.stoppedOn says
+// why), so keep calling while paginationToken is returned. Only successful
+// transactions by default (status: "any" includes failed), as with history.
+// Costs 10 credits plus 1 per history page scanned (up to 1,000 transactions).
+// By default (scope: "address") an instruction or balance only counts when it
+// involves the scanned address; scope: "transaction" on a program or mint
+// entry counts it anywhere in the transaction.
+const matches = await helius.parsedEvents.scan({
+  address: "wallet_address",
+  match: {
+    // Up to 20 programs: an instruction of any of them that involves the wallet
+    programs: [{ programId: "program_id", instructions: ["buy", "sell"] }],
+    // Optional, up to 20; with programs set, both must match. Counts the
+    // wallet's own balances of the mint
+    mints: [{ mint: "mint_address" }]
+  },
+  time: { gte: 1767225600 }
+});
+
+// Scanning a program's own address: its instructions involve it, but its token
+// accounts usually belong to PDAs, so give mints scope: "transaction"
+const programMatches = await helius.parsedEvents.scan({
+  address: "program_id",
+  match: {
+    programs: [{ programId: "program_id", instructions: ["buy", "sell"] }],
+    mints: [{ mint: "mint_address", scope: "transaction" }]
+  }
+});
+// The native SOL pseudo-mint So11111111111111111111111111111111111111111
+// matches lamport changes (not counting the fee); wrapped SOL (...112) is a
+// normal token mint.
+
+// returnShape: "signatures" returns { signature, slot, transactionIndex, blockTime }
+// per match; "count" returns no data, only scan.matchedTransactions. Both
+// ignore limit and cover each request's whole scanned range, which is capped
+// by the budget, so sum scan.matchedTransactions across pages for a total.
+const { scan, paginationToken } = await helius.parsedEvents.scan({
+  address: "wallet_address",
+  match: { mints: [{ mint: "mint_address" }] },
+  returnShape: "count"
+});
+
+// Raw transactions next to the parsed ones (all three methods):
+// rawTransaction: "json" | "jsonParsed" | "base64"
+```
+
+### Staking
+Stake SOL to the Helius validator programmatically.
+
+```typescript
+// Create a stake transaction
+const stakeTx = await helius.stake.createStakeTransaction({
+  wallet: walletAddress,
+  amount: 1_000_000_000n, // 1 SOL in lamports
+});
+
+// Get all stake accounts for a wallet
+const stakeAccounts = await helius.stake.getHeliusStakeAccounts(walletAddress);
+```
+
+### Webhooks
+Listen to on-chain events in real-time.
+
+```typescript
+// Create a webhook for NFT sales
+const webhook = await helius.webhooks.create({
+  webhookURL: "https://your-server.com/webhook",
+  transactionTypes: ["NFT_SALE", "NFT_LISTING"],
+  accountAddresses: ["marketplace_address"],
+});
+
+// List all webhooks
+const all = await helius.webhooks.getAll();
+
+// Toggle a webhook on or off (re-enable auto-disabled webhooks, or pause deliveries)
+const toggled = await helius.webhooks.toggle("webhook_id", true);
+
+// Delete a webhook
+await helius.webhooks.delete("webhook_id");
+```
+
+### WebSockets
+Stream real-time blockchain data via standard Solana WebSocket subscriptions.
+
+```typescript
+// Subscribe to transaction logs
+const sub = await helius.ws.logsNotifications("all", { commitment: "confirmed" });
+const stream = await sub.subscribe();
+for await (const log of stream) {
+  console.log("New log:", log);
+}
+
+// Filter options: "all", "allWithVotes", or { mentions: [address] }
+const filtered = await helius.ws.logsNotifications({ mentions: [walletAddress] });
+
+// Other subscriptions
+await helius.ws.accountNotifications(accountAddress);   // Account changes
+await helius.ws.signatureNotifications(txSignature);    // Transaction confirmation
+await helius.ws.slotNotifications();                    // Slot updates
+await helius.ws.programNotifications(programId);        // Program account changes
+
+// Clean up
+helius.ws.close();
+
+// Parsed Streams (all plans) — decoded transactions filtered server-side by
+// program / instruction / account / role. Reconnects and resubscribes on its own.
+import { makeParsedStreamsClient } from "helius-sdk/websockets/parsedStreams";
+const streams = makeParsedStreamsClient(apiKey, {
+  onReconnect: ({ lastSlot }) => console.warn("backfill after slot", lastSlot),
+});
+const { instructions } = await streams.describeProgram(JUPITER_PROGRAM_ID); // exact names
+const parsed = await streams.parsedTransactionSubscribe(
+  { programs: [JUPITER_PROGRAM_ID], instructionNames: ["route"] },
+  { details: "full" } // or "matched" / "raw"
+);
+for await (const { context, value } of parsed) {
+  for (const i of value.matchedIndexes ?? []) {
+    console.log(context.slot, value.instructions[i].decoded?.args);
+  }
+}
+streams.close();
+
+// Enhanced WebSockets (Business+ plan) — 1.5-2x faster, up to 50k address filters
+const sub = await helius.ws.transactionSubscribe(
+  { accountInclude: ["EPjF..."] },
+  // Required when transactionDetails is "accounts" or "full"; 1 opts in to v1 (SIMD-0385)
+  {
+    commitment: "confirmed",
+    encoding: "jsonParsed",
+    maxSupportedTransactionVersion: 1,
+  }
+);
+for await (const notif of sub) {
+  console.log(notif.signature, notif.slot);
+}
+await sub.unsubscribe();
+
+// Enhanced account subscription
+const acctSub = await helius.ws.accountSubscribe("EPjF...", {
+  encoding: "jsonParsed",
+  commitment: "confirmed",
+});
+for await (const notif of acctSub) {
+  console.log(notif.value.lamports);
+}
+await acctSub.unsubscribe();
+```
+
+### ZK Compression
+Work with compressed accounts for scalability.
+
+```typescript
+// Get a compressed account
+const account = await helius.zk.getCompressedAccount({ address: "..." });
+
+// Get compressed token balances
+const balances = await helius.zk.getCompressedTokenBalancesByOwner({ owner: "..." });
+
+// Get validity proofs
+const proof = await helius.zk.getValidityProof({ hashes: ["..."] });
+```
+
+### Standard Solana RPC
+All standard Solana RPC methods are available via the Helius client and send automatically (no `.send()`).
+
+```typescript
+const balance = await helius.getBalance(address);
+const blockhash = await helius.getLatestBlockhash();
+const slot = await helius.getSlot();
+```
+
+To pass the client to @solana/kit helpers or libraries that expect a kit `Rpc`, use `helius.kitRpc` (methods return a pending request; call `.send()`). Never pass `helius` or `helius.raw` to them: the request is sent, then the helper fails on `.send()`.
+
+```typescript
+import { fetchEncodedAccount } from "@solana/kit";
+
+const account = await fetchEncodedAccount(helius.kitRpc, address);
+const kitSlot = await helius.kitRpc.getSlot().send();
+```
+
+## Key Types
+
+```typescript
+// Asset (NFT/Token)
+interface Asset {
+  id: string;
+  interface: "V1_NFT" | "FUNGIBLE_TOKEN" | "PROGRAMMABLE_NFT" | ...;
+  content?: { metadata: { name, symbol, description }, files: [...] };
+  ownership: { owner: string, frozen: boolean, delegated: boolean };
+  compression?: { compressed: boolean, tree: string, leaf_id: number };
+}
+
+// Priority fee levels
+type PriorityLevel = "Min" | "Low" | "Medium" | "High" | "VeryHigh" | "UnsafeMax" | "Default";
+
+// Token types for filtering
+type TokenType = "fungible" | "nonFungible" | "compressedNft" | "all";
+```
+
+## Common Patterns
+
+### Pagination
+```typescript
+// Page-based (DAS API)
+let page = 1;
+let allAssets = [];
+while (true) {
+  const result = await helius.getAssetsByOwner({ ownerAddress: "...", page, limit: 1000 });
+  allAssets.push(...result.items);
+  if (result.items.length < 1000) break;
+  page++;
+}
+
+// Cursor-based (RPC V2)
+let cursor = null;
+while (true) {
+  const result = await helius.getProgramAccountsV2([programId, { limit: 1000, paginationKey: cursor }]);
+  // process result.accounts
+  cursor = result.paginationKey;
+  if (!cursor) break;
+}
+```
+
+### Error Handling
+```typescript
+try {
+  const asset = await helius.getAsset({ id: "invalid" });
+} catch (error) {
+  // 401 = Invalid API key
+  // 429 = Rate limited (too many requests or out of credits)
+  // 5xx = Server error
+  console.error(error.message);
+}
+```
+
+### Plans and Rate Limits
+
+| Feature | Free | Developer $49/mo | Business $499/mo | Professional $999/mo |
+|---------|------|------------------|------------------|----------------------|
+| Monthly Credits | 1 Million | 10 Million | 100 Million | 200 Million |
+| RPC Rate Limits | 10 req/s | 50 req/s | 200 req/s | 500 req/s |
+| DAS API and Enhanced API Rate Limits | 2 req/s | 10 req/s | 50 req/s | 100 req/s |
+| Sender Rate Limits | 15/s | 15/s | 15/s | 15/s |
+| Standard WebSockets Availability | ✓ | ✓ | ✓ | ✓ |
+| Helius Enhanced WebSockets Availability | No | ✓ | ✓ | ✓ |
+| Helius Sender Availability | ✓ | ✓ | ✓ | ✓ |
+| Helius LaserStream gRPC Availability (2 credits/0.1mb) | No | Devnet | Devnet + Mainnet | Devnet + Mainnet |
+| Support | Community | Chat | Priority Chat | Slack/Telegram |
+
+- When you receive a 429 error, back off and retry with exponential delay
+- Monitor your usage at https://dashboard.helius.dev
+- We recommend using webhooks and WebSockets for real-time data instead of polling
+
+## Documentation
+
+- API Reference: https://www.helius.dev/docs/llms.txt
+- SDK API Docs (TypeDoc): https://helius-labs.github.io/helius-sdk/
+- Changelog: https://github.com/helius-labs/helius-sdk/blob/main/CHANGELOG.md
+- Migration Guide (1.x to 2.x): https://github.com/helius-labs/helius-sdk/blob/main/MIGRATION.md
+- @solana/kit Docs: https://www.solanakit.com
+
+## For AI Agents Contributing to This Repo
+
+See [agents.md](https://github.com/helius-labs/helius-sdk/blob/main/agents.md) for contribution guidelines, architecture decisions, code style, and PR process.

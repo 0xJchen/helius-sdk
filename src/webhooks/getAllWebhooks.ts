@@ -1,0 +1,29 @@
+import type { Webhook } from "../types/webhooks";
+import { getSDKHeaders } from "../http";
+
+export const getAllWebhooks = async (
+  apiKey: string,
+  userAgent?: string
+): Promise<Webhook[]> => {
+  const url = `https://api-mainnet.helius-rpc.com/v0/webhooks?api-key=${apiKey}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+      ...getSDKHeaders(userAgent),
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  if (data.error) {
+    throw new Error(`Helius error: ${JSON.stringify(data.error)}`);
+  }
+
+  return data as Webhook[];
+};

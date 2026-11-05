@@ -1,0 +1,213 @@
+/** @type {import('bundlemon').Config} */
+export default {
+  files: [
+    {
+      path: 'dist/rpc/index.js',           
+      maxSize: '2kb',     
+      maxPercentIncrease: 5
+    },
+    {
+      path: 'dist/rpc/createHelius.eager.js',
+      maxSize: '1.5kb',
+      maxPercentIncrease: 5
+    },
+    {
+      path: 'dist/esm/auth/client.js',
+      maxSize: '2.5kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: the deprecation JSDoc on
+      // createProject / payUSDC (wallet-created projects were removed) is kept
+      // in the output, and payUSDC now throws instead of sending USDC. These
+      // modules are tiny, so a few comment lines exceed 15%.
+      path: 'dist/esm/auth/createProject.js',
+      maxSize: '1kb',
+    },
+    {
+      path: 'dist/esm/auth/payUSDC.js',
+      maxSize: '1kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: adds normalizeContactField,
+      // requireContactInfo and EMAIL_PATTERN, shared by signup and upgradePlan.
+      path: 'dist/esm/auth/signupHelpers.js',
+      maxSize: '1kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: upgradePlan now validates
+      // contact info (shared requireContactInfo) when any field is passed.
+      path: 'dist/esm/auth/upgradePlan.js',
+      maxSize: '1.5kb',
+    },
+    {
+      path: 'dist/esm/auth/constants.js',
+      maxSize: '1.5kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: this module exposes a
+      // small family of configs-fetch helpers (fetchDevPortalConfigs,
+      // fetchStripePriceIds, fetchPrepaidCreditsPriceIds). The absolute
+      // cap still gates unbounded growth.
+      path: 'dist/esm/auth/devPortalConfigs.js',
+      maxSize: '1kb',
+    },
+    {
+      // Lazy-loaded HeliusClient entry point: every new defineLazyMethod
+      // adds ~50B gzipped. Bumped after getTransfersByAddress (#313) put
+      // the file at 2.55KB.
+      path: 'dist/esm/rpc/index.js',
+      maxSize: '2.6kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: buildRpcUrl moved here from
+      // index.js and createHelius.eager.js (#352), a net reduction across the three.
+      path: 'dist/esm/rpc/transport.js',
+      maxSize: '1kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: defineLazyNamespace now
+      // returns one stable object that gains a cached forwarder per method on
+      // load (so keys, `in`, and spies work, including after a spy restore),
+      // is not thenable and ignores toJSON/asymmetricMatch/symbol probes before
+      // load, and swallows the read-time prefetch rejection that crashed Node;
+      // both helpers share a loader that retries after a failure
+      // (922B -> ~1.5KB). The absolute cap still gates growth.
+      path: 'dist/esm/rpc/lazy.js',
+      maxSize: '1.75kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: the caller now throws a
+      // HeliusRpcError carrying the JSON-RPC method, code, and data, and
+      // rejects responses with neither result nor error (299B -> ~525B). A
+      // one-time step up from a tiny file; the absolute cap still gates growth.
+      path: 'dist/esm/rpc/caller.js',
+      maxSize: '0.75kb',
+    },
+    {
+      // Aggregator for every checkout primitive: resolvePriceId,
+      // initializeCheckout, getCheckoutPreview, getCheckoutPreviewByPriceId,
+      // getPaymentIntent, getPaymentStatus, pollCheckoutCompletion.
+      path: 'dist/esm/auth/checkout.js',
+      maxSize: '1.7kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: this PR adds the
+      // HELIUS_API_URL env override (resolveApiUrl + /v0 auto-append) and
+      // structured JSON-error parsing. The absolute cap still gates growth.
+      path: 'dist/esm/auth/utils.js',
+      maxSize: '1.5kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: getHttpStatus now prefers
+      // a structured `status` property before falling back to message parsing.
+      path: 'dist/esm/auth/getHttpStatus.js',
+      maxSize: '1kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: now owns the v1 protocol
+      // constants (V1_TRANSACTION_SIZE_LIMIT, MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES)
+      // and the loaded-accounts-data-size-limit validator alongside the ALT and
+      // size guards. The absolute cap still gates unbounded growth.
+      path: 'dist/esm/transactions/validateTxMessage.js',
+      maxSize: '2kb',
+    },
+    {
+      path: 'dist/esm/websockets/wsAsync.js',
+      maxSize: '1.5kb',
+    },
+    {
+      // Standalone Pre Confirmations WS client: one text+binary socket per
+      // subscription (frames carry no subscription id, so filtered
+      // subscriptions can't share one), server-side filters, a subscribe
+      // deadline covering the handshake, unsubscribe-and-close, keepalive with
+      // a JSON-RPC ping fallback, a bounded multi-consumer queue,
+      // getPreConfCoverage over HTTPS, plus the binary frame decoders
+      // (decodePreconfFrame for transactions, decodePreconfEvent adding
+      // opt-in slot events). The module overview lives on the erased
+      // PreconfWsClient interface so it ships only in the .d.ts. Self-contained
+      // (does not reuse enhancedWs); lands at ~4.3KB. The absolute cap still
+      // gates unbounded growth.
+      path: 'dist/esm/websockets/preconfWs.js',
+      maxSize: '4.5kb',
+    },
+    {
+      // Standalone Parsed Streams WS client: JSON-RPC request routing with
+      // timeouts, a handshake timeout, a paced send queue (server allows 10
+      // msgs/s), reconnect with backoff that resubscribes every filter (the
+      // server closes idle connections after 10 min, plus deploys and edge
+      // recycling) and resets only once a connection proves stable, a
+      // ping-based liveness watchdog for `ws` sockets, per-subscription async
+      // queues, and one-shot describeProgram discovery. Self-contained like
+      // preconfWs; the overview and usage example live on the erased
+      // ParsedStreamsClient interface so they ship only in the .d.ts. Lands at
+      // ~4.4KB; the absolute cap still gates unbounded growth.
+      path: 'dist/esm/websockets/parsedStreams.js',
+      maxSize: '4.75kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: Sender Max pricing adds
+      // MIN_TIP_LAMPORTS_MAX + deprecated MIN_TIP_LAMPORTS_DUAL alias and the
+      // corrected SWQOS floor. Absolute cap still gates unbounded growth.
+      path: 'dist/esm/transactions/types.js',
+      maxSize: '2.5kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: determineTipSol now branches
+      // on the Sender Max vs SWQOS-only floor. Absolute cap still gates growth.
+      path: 'dist/esm/transactions/determineTip.js',
+      maxSize: '2.5kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: this file now builds both
+      // the legacy/v0 compute-budget instruction pair and the version 1 header
+      // config (SIMD-0385), picks a fee-estimate request shape per version,
+      // and always writes the v1 loaded-accounts-data-size limit (an absent
+      // field is a 0-byte budget that fails account loading). The fee math
+      // lives in priorityFee.js and the version checks in validateTxMessage.js
+      // to keep further growth out of this module.
+      path: 'dist/esm/transactions/createSmartTransaction.js',
+      maxSize: '2.6kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: createTxMessage is now
+      // generic over the transaction version so a v1 caller gets a v1-typed
+      // message, and applies the v1 address-lookup-table guard. Bumped again
+      // for the hand-assembly JSDoc warning that a config-less v1 message has
+      // a 0-CU / 0-byte budget (SIMD-0385) — a fee-burning footgun worth the
+      // shipped bytes. The absolute cap still gates further growth.
+      path: 'dist/esm/transactions/createTxMessage.js',
+      maxSize: '1.2kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: the estimator moved to
+      // @solana/kit's version-aware helper (the compute-budget one appends a
+      // SetComputeUnitLimit instruction, a no-op on v1) and is now built lazily
+      // on first estimate. Absolute cap still gates unbounded growth.
+      path: 'dist/esm/transactions/getComputeUnits.js',
+      maxSize: '1kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: this barrel now re-exports
+      // the transaction-building helpers (createTxMessage, resolvePriorityFee,
+      // the v1 validators) for consumers assembling v1 transactions by hand.
+      // Re-export lines only; the absolute cap still gates growth.
+      path: 'dist/esm/transactions/index.js',
+      maxSize: '0.75kb',
+    },
+    {
+      // Opt out of the default 15% growth ratchet: the poll loop now decodes
+      // the signature status once per iteration, takes a final fresh status
+      // read after observing blockhash expiry, and exports the bigint-safe
+      // stringifyTxError serializer shared with broadcastTransaction. A
+      // one-time step up from a small file; the absolute cap still gates
+      // unbounded growth.
+      path: 'dist/esm/transactions/pollTransactionConfirmation.js',
+      maxSize: '1.5kb',
+    },
+    {
+      path: 'dist/**/*.js',
+      maxSize: '2.5kb',  // No file should be larger than 2.5kb
+      maxPercentIncrease: 15
+    }
+  ]
+};

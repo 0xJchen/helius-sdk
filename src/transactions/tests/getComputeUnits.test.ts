@@ -1,0 +1,80 @@
+import { makeGetComputeUnits } from "../getComputeUnits";
+import type {
+  TransactionMessage,
+  TransactionMessageWithFeePayer,
+} from "@solana/kit";
+
+/**
+ * We sub out @solana/kit's estimator so that:
+ *   estimateComputeUnitLimitFactory({ rpc }) ➜ mockEstimateFn
+ *
+ * Kit's estimator is used over the @solana-program/compute-budget one because
+ * it raises the simulation limit through a version-aware helper, which v1
+ * transactions need — see the note in getComputeUnits.ts
+ */
+const mockEstimate = jest.fn();
+
+jest.mock("@solana/kit", () => ({
+  ...jest.requireActual("@solana/kit"),
+  estimateComputeUnitLimitFactory: () => mockEstimate,
+}));
+
+// A dummy "rpc" that satisfies the type but is never called because of the sub
+const dummyRpc: any = {};
+
+// A minimal, compilable tx‑message object (i.e., instructions + version)
+const dummyMessage: TransactionMessage & TransactionMessageWithFeePayer = {
+  instructions: [],
+  version: 0,
+} as any;
+
+describe("getComputeUnits Tests", () => {
+  beforeEach(() => mockEstimate.mockReset());
+
+  it("Applies default min (1000) and 10% buffer", async () => {
+    mockEstimate.mockResolvedValueOnce(5000n);
+
+    const getComputeUnits = makeGetComputeUnits(dummyRpc);
+    const result = await getComputeUnits(dummyMessage);
+
+    // 5000 * 1.1 = 5500
+    expect(result).toBe(5500);
+    expect(mockEstimate).toHaveBeenCalledWith(dummyMessage);
+  });
+
+  it("Respects custom min + bufferPct options", async () => {
+    mockEstimate.mockResolvedValueOnce(3000); // Plain number should also be ok
+
+    const getComputeUnits = makeGetComputeUnits(dummyRpc);
+    const result = await getComputeUnits(dummyMessage, {
+      min: 2000,
+      bufferPct: 0.2, // 20 %
+    });
+
+    // ceil(3000 * 1.2) = 3600  (i.e., greater than the 2k min)
+    expect(result).toBe(3600);
+  });
+
+  it("Never returns 0, even with min: 0 and an empty simulation", async () => {
+    mockEstimate.mockResolvedValueOnce(0);
+
+    const getComputeUnits = makeGetComputeUnits(dummyRpc);
+    const result = await getComputeUnits(dummyMessage, { min: 0 });
+
+    // A literal 0 CU limit is exact on version 1 (SIMD-0385) and fails on-chain
+    expect(result).toBe(1);
+  });
+
+  it("Falls back to min when estimate is extremely low", async () => {
+    mockEstimate.mockResolvedValueOnce(100);
+
+    const getComputeUnits = makeGetComputeUnits(dummyRpc);
+    const result = await getComputeUnits(dummyMessage, {
+      min: 1500,
+      bufferPct: 0.1,
+    });
+
+    // 100 * 1.1 = 110 is lower than min, so result === min
+    expect(result).toBe(1500);
+  });
+});
